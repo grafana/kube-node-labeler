@@ -1,0 +1,48 @@
+name: Publish container
+
+permissions:
+  contents: none
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0 # Needed for the version script to work.
+          persist-credentials: false
+
+      - name: Compute repo metadata
+        id: repo
+        run: |-
+          echo "version=$(git describe --dirty --tags --always)" >> $GITHUB_OUTPUT
+          cat $GITHUB_OUTPUT
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3
+        with:
+          cache-binary: false # https://woodruffw.github.io/zizmor/audits/#cache-poisoning
+      - name: Log into ghcr.io
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          tags: |-
+            ghcr.io/${{ github.repository }}:${{ steps.repo.outputs.version }}
+          push: true
+          platforms: linux/amd64,linux/arm64
