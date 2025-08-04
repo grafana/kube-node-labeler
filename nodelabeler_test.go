@@ -5,7 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
-	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,17 +18,70 @@ import (
 	acorev1 "k8s.io/client-go/applyconfigurations/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 func TestKubeNodeLabeler(t *testing.T) {
 	t.Parallel()
 
+	t.Run("with kubernetes fake clientset", func(t *testing.T) {
+		t.Parallel()
+		testMigratingPodSequence(t, true)
+	})
+
+	t.Run("with TEST_KUBECONFIG", func(t *testing.T) {
+		t.Parallel()
+
+		kc := os.Getenv("TEST_KUBECONFIG")
+		if kc == "" {
+			t.Skipf("Skipping test against real cluster as TEST_KUBECONFIG is not defined")
+		}
+
+		testMigratingPodSequence(t, false)
+	})
+}
+
+// testMigratingPodSequence tests the main controller loop by creating an initial state with a target pod on a known
+// node, and then moving the pod somewhere else, checking after both steps that the nodes are labeled as they should.
+//
+// The magic fakeCS boolean tweaks the test either towards the kubernetes fake client (if true), or towards a real-ish
+// cluster. For the fake client, the test gives less time for the (non-existent) cluster to initialize, and causes it
+// to create node objects.
+func testMigratingPodSequence(t *testing.T, fakeCS bool) {
+	var cs kubernetes.Interface
+
+	if fakeCS {
+		cs = fake.NewClientset()
+	} else {
+		kc, err := os.ReadFile(os.Getenv("TEST_KUBECONFIG"))
+		if err != nil {
+			t.Fatalf("cannot read kubeconfig from TEST_KUBECONFIG: %v", err)
+		}
+
+		rest, err := clientcmd.RESTConfigFromKubeConfig(kc)
+		if err != nil {
+			t.Fatalf("creating kubernetes rest config: %v", err)
+		}
+
+		cs, err = kubernetes.NewForConfig(rest)
+		if err != nil {
+			t.Fatalf("creating kubernetes client: %v", err)
+		}
+	}
+
+	// Timings for the test.
+	nlInterval := time.Second
+	resyncPeriod := 400 * time.Millisecond
+	reconcileTime := 1500 * time.Millisecond
+	if !fakeCS {
+		// We're working with a real cluster, be friendlier and/or more lenient
+		const slowness = 3
+		nlInterval *= slowness
+		resyncPeriod *= slowness
+		reconcileTime *= 10 // This includes the time to create and delete pods, which is slow.
+	}
+
 	const testns = "test"
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	cs := fake.NewClientset()
 
 	const testLabel = "interesting-node"
 
@@ -39,7 +92,7 @@ func TestKubeNodeLabeler(t *testing.T) {
 		KubeClient: cs,
 		ConfigEntries: []*config.Entry{
 			{
-				Interval:      time.Second,
+				Interval:      nlInterval,
 				Namespace:     testns,
 				LabelSelector: selector(t, "app.k8s.io/name=pod1"),
 				NodeLabel:     testLabel,
@@ -47,10 +100,19 @@ func TestKubeNodeLabeler(t *testing.T) {
 		},
 		// Informers interact weirdly with the k8s fake client. Work around that by making them poll very often.
 		// Ref: https://github.com/kubernetes/kubernetes/issues/95372#issuecomment-717016660
-		ResyncPeriod: time.Second,
+		ResyncPeriod: resyncPeriod,
 	}
 
+	// WG to wait for the nodeLabeler goroutine before ending the test. Wait() must be deferred before cancelling the context.
+	nlWg := &sync.WaitGroup{}
+	defer nlWg.Wait()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	nlWg.Add(1)
 	go func() {
+		defer nlWg.Done()
 		err := nl.Start(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			t.Errorf("nodelabeler returned an error: %v", err)
@@ -58,26 +120,43 @@ func TestKubeNodeLabeler(t *testing.T) {
 		}
 	}()
 
-	t.Log("Creating starting nodes")
+	if fakeCS {
+		t.Log("Running on the fake client, creating starting nodes")
+		for _, name := range []string{"node1", "node2", "node3"} {
+			createNode(t, cs, name)
+		}
+	}
 
-	for _, name := range []string{"node1", "node2", "node3"} {
-		createNode(t, cs, name)
+	nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("Listing nodes: %v", err)
+	}
+
+	if len(nodes.Items) != 3 {
+		t.Fatalf("This test must be run on a cluster with 3 nodes, found: %d", len(nodes.Items))
+	}
+
+	t.Log("Creating test namespace")
+	_, err = cs.CoreV1().Namespaces().Apply(ctx, acorev1.Namespace(testns), metav1.ApplyOptions{FieldManager: testFM})
+	if err != nil {
+		t.Fatalf("cannot create test namespace %q: %v", testns, err)
 	}
 
 	t.Log("Creating starting pods inside the first two nodes")
 
-	for _, podNodeNs := range []string{"pod1:node1:" + testns, "pod2:node2:" + testns} {
-		createPodInNode(t, cs, podNodeNs)
+	podNames := []string{"pod1", "pod2", "pod3"} // One per node.
+	for i, node := range nodes.Items {
+		createPodInNode(t, cs, podNames[i], node.Name, testns)
 	}
 
 	// Give our controller time to reconcile.
-	time.Sleep(2 * time.Second)
+	time.Sleep(reconcileTime)
 
 	// Check label presence
 	for node, shouldHaveLabel := range map[string]bool{
-		"node1": true, // pod1 matches the label, thus node1 should be interesting now
-		"node2": false,
-		"node3": false,
+		nodes.Items[0].Name: true, // pod1 matches the label, thus node1 should be interesting now
+		nodes.Items[1].Name: false,
+		nodes.Items[2].Name: false,
 	} {
 		node, err := cs.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
 		if err != nil {
@@ -91,19 +170,19 @@ func TestKubeNodeLabeler(t *testing.T) {
 
 	t.Log("Removing interesting pod")
 
-	err := cs.CoreV1().Pods(testns).Delete(ctx, "pod1", metav1.DeleteOptions{})
+	err = cs.CoreV1().Pods(testns).Delete(ctx, "pod1", metav1.DeleteOptions{})
 	if err != nil {
 		t.Fatalf("deleting pod: %v", err)
 	}
 
 	// Give our controller time to reconcile.
-	time.Sleep(2 * time.Second)
+	time.Sleep(reconcileTime)
 
 	// Check label presence
 	for node, shouldHaveLabel := range map[string]bool{
-		"node1": false, // All nodes shoudld be unlabeled now.
-		"node2": false,
-		"node3": false,
+		nodes.Items[0].Name: false, // Interesting pod deleted, all nodes should be unlabeled.
+		nodes.Items[1].Name: false,
+		nodes.Items[2].Name: false,
 	} {
 		node, err := cs.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
 		if err != nil {
@@ -117,16 +196,16 @@ func TestKubeNodeLabeler(t *testing.T) {
 
 	t.Log("Creating interesting pod elsewhere")
 
-	createPodInNode(t, cs, "pod1:node3:"+testns)
+	createPodInNode(t, cs, podNames[0], nodes.Items[2].Name, testns)
 
 	// Give our controller time to reconcile.
-	time.Sleep(2 * time.Second)
+	time.Sleep(reconcileTime)
 
 	// Check label presence
 	for node, shouldHaveLabel := range map[string]bool{
-		"node1": false,
-		"node2": false,
-		"node3": true, // Interesting pod moved here.
+		nodes.Items[0].Name: false,
+		nodes.Items[1].Name: false,
+		nodes.Items[2].Name: true, // Interesting pod moved here.
 	} {
 		node, err := cs.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
 		if err != nil {
@@ -139,35 +218,42 @@ func TestKubeNodeLabeler(t *testing.T) {
 	}
 }
 
+const testFM = "node-manager-test"
+
 func createNode(t *testing.T, cs kubernetes.Interface, name string) {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	t.Cleanup(cancel)
-	_, err := cs.CoreV1().Nodes().Apply(ctx, acorev1.Node(name), metav1.ApplyOptions{})
+	_, err := cs.CoreV1().Nodes().Apply(ctx, acorev1.Node(name), metav1.ApplyOptions{FieldManager: testFM})
 	if err != nil {
 		t.Fatalf("creating %q: %v", name, err)
 	}
 }
 
-func createPodInNode(t *testing.T, cs kubernetes.Interface, podNodeNs string) {
+func createPodInNode(t *testing.T, cs kubernetes.Interface, pod, node, ns string) {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	t.Cleanup(cancel)
-
-	split := strings.Split(podNodeNs, ":")
-	pod := split[0]
-	node := split[1]
-	ns := split[2]
 
 	_, err := cs.CoreV1().Pods(ns).Apply(ctx,
 		acorev1.Pod(pod, ns).
 			WithLabels(map[string]string{"app.k8s.io/name": pod}).
-			WithSpec(acorev1.PodSpec().WithNodeName(node)),
-		metav1.ApplyOptions{})
+			WithSpec(
+				acorev1.PodSpec().
+					WithNodeName(node).
+					WithTerminationGracePeriodSeconds(1).
+					WithContainers(
+						acorev1.Container().
+							WithName(pod).
+							WithImage("alpine:latest").
+							WithArgs("sleep", "infinity"),
+					),
+			),
+		metav1.ApplyOptions{FieldManager: testFM})
 	if err != nil {
-		t.Fatalf("creating %q: %v", podNodeNs, err)
+		t.Fatalf("creating %s/%s in %s: %v", ns, pod, node, err)
 	}
 }
 
