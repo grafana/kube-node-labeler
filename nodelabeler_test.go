@@ -154,6 +154,14 @@ func testMigratingPodSequence(t *testing.T, fakeCS bool) {
 		t.Fatalf("cannot create test namespace %q: %v", testns, err)
 	}
 
+	defer func() {
+		t.Log("Deleting test namespace")
+		err := cs.CoreV1().Namespaces().Delete(ctx, testns, metav1.DeleteOptions{})
+		if err != nil {
+			t.Fatalf("cannot create test namespace %q: %v", testns, err)
+		}
+	}()
+
 	t.Log("Creating starting pods inside the first two nodes")
 
 	podNames := []string{"pod1", "pod2", "pod3"} // One per node.
