@@ -80,14 +80,17 @@ func testMigratingPodSequence(t *testing.T, fakeCS bool) {
 
 	// Timings for the test.
 	nlInterval := time.Second
+	// Informers interact weirdly with the k8s fake client. Work around that by making them poll very often.
+	// Ref: https://github.com/kubernetes/kubernetes/issues/95372#issuecomment-717016660
 	resyncPeriod := 400 * time.Millisecond
 	reconcileTime := 1500 * time.Millisecond
 	if !fakeCS {
 		// We're working with a real cluster, be friendlier and/or more lenient
-		const slowness = 3
-		nlInterval *= slowness
-		resyncPeriod *= slowness
-		reconcileTime *= 10 // This includes the time to create and delete pods, which is slow.
+		nlInterval = 3 * time.Second
+		// Purposefully beyond test time, to test watchers work correctly.
+		resyncPeriod = 10 * time.Minute
+		// This includes the time to create and delete pods, which is slow.
+		reconcileTime = 7 * time.Second
 	}
 
 	const testns = "test"
