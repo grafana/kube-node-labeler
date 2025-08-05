@@ -12,23 +12,8 @@ permissions:
   contents: none
 
 jobs:
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
-        with:
-          go-version-file: go.mod
-      - run: |
-          go build -o app ./cmd
-
-  test:
-    name: Test
+  build-test:
+    name: Build and test
     strategy:
       matrix:
         platform: [ ubuntu-latest, ubuntu-24.04-arm ]
@@ -37,6 +22,9 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
       # TODO: Maybe kwok would be better for this.
       # https://kwok.sigs.k8s.io/docs/user/github-action/
       - name: Setup Minikube
@@ -50,10 +38,14 @@ jobs:
           driver: docker # Needed for multi-node cluster.
           start args: --nodes=3
           github token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
         with:
-          persist-credentials: false
-      - env:
+          go-version-file: go.mod
+      - name: Build
+        run: |
+          go build -o app ./cmd
+      - name: Test
+        env:
           PLATFORM: ${{ matrix.platform}}
         run: |
           if [[ "$PLATFORM" != *arm* ]]; then
