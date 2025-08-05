@@ -260,7 +260,7 @@ func createPodInNode(t *testing.T, cs kubernetes.Interface, pod, node, ns string
 						acorev1.Container().
 							WithName(pod).
 							WithImage("alpine:latest").
-							WithArgs("sleep", "infinity"),
+							WithCommand("/bin/false"),
 					),
 			),
 		metav1.ApplyOptions{FieldManager: testFM})
