@@ -37,23 +37,17 @@ jobs:
     permissions:
       contents: read
     steps:
-      # TODO: Maybe kwok would be better for this.
-      # https://kwok.sigs.k8s.io/docs/user/github-action/
-      - name: Setup Minikube
-        uses: manusa/actions-setup-minikube@b589f2d61bf96695c546929c72b38563e856059d # v2.14.0
-        if: ${{ !contains(matrix.platform, 'arm') }} # Minikube only works on amd
-        with:
-          # Renovate interacts with the two lines below. Please keep their formatting as it is.
-          # TODO: Actually create renovate rules for these.
-          minikube version: v1.36.0
-          kubernetes version: v1.33.3
-          driver: docker # Needed for multi-node cluster.
-          start args: --nodes=3
-          github token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
-      - env:
+      - name: Set up kwok
+        uses: kubernetes-sigs/kwok@c04392afe3cc6929cd3cc79f61d8bdcd83a8ba5d # v0.7.0
+        with:
+          command: kwokctl
+      - name: Create kwok cluster
+        run: kwokctl create cluster
+      - name: Run tests
+        env:
           PLATFORM: ${{ matrix.platform}}
         run: |
           if [[ "$PLATFORM" != *arm* ]]; then
