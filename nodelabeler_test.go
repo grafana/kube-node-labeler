@@ -3,8 +3,11 @@ package kubenodelabeler_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -61,6 +64,12 @@ func testMigratingPodSequence(t *testing.T, fakeCS bool) {
 		rest, err := clientcmd.RESTConfigFromKubeConfig(kc)
 		if err != nil {
 			t.Fatalf("creating kubernetes rest config: %v", err)
+		}
+
+		if os.Getenv("TEST_KUBE_LOG") != "" {
+			rest.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+				return logRoundTripper{inner: rt, log: *slog.Default()}
+			}
 		}
 
 		cs, err = kubernetes.NewForConfig(rest)
@@ -265,4 +274,29 @@ func selector(t *testing.T, str string) labels.Selector {
 	}
 
 	return sel
+}
+
+type logRoundTripper struct {
+	log   slog.Logger
+	inner http.RoundTripper
+}
+
+func (rt logRoundTripper) RoundTrip(r *http.Request) (resp *http.Response, err error) {
+	requestLine := fmt.Sprintf("%s %s", r.Method, r.URL.String())
+
+	log := rt.log.With()
+	if host := r.Header["Host"]; len(host) > 0 {
+		log = log.With("host", strings.Join(host, ","))
+	}
+
+	log.Info(requestLine, "state", "request")
+
+	resp, err = rt.inner.RoundTrip(r)
+	if err != nil {
+		log.Error(requestLine)
+		return
+	}
+
+	log.Info(requestLine, "state", "response", "statusCode", resp.StatusCode)
+	return
 }
