@@ -162,7 +162,7 @@ func testMigratingPodSequence(t *testing.T, fakeCS bool) {
 		}
 	}()
 
-	t.Log("Creating starting pods inside the first two nodes")
+	t.Log("Creating pods")
 
 	podNames := []string{"pod1", "pod2", "pod3"} // One per node.
 	for i, node := range nodes.Items {
