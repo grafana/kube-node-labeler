@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
 	kubenodelabeler "github.com/grafana/kube-node-labeler"
 	"github.com/grafana/kube-node-labeler/config"
@@ -73,8 +75,8 @@ func run() error {
 		ConfigEntries: cfg.Entries,
 	}
 
-	ctx := context.Background()
-	// TODO: Catch signal, cancel context.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 
 	eg := errgroup.Group{}
 	eg.Go(func() error {
