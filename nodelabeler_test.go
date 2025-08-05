@@ -108,11 +108,9 @@ func testMigratingPodSequence(t *testing.T, fakeCS bool) {
 				Namespace:     testns,
 				LabelSelector: selector(t, "app.k8s.io/name=pod1"),
 				NodeLabel:     testLabel,
+				ResyncPeriod:  resyncPeriod,
 			},
 		},
-		// Informers interact weirdly with the k8s fake client. Work around that by making them poll very often.
-		// Ref: https://github.com/kubernetes/kubernetes/issues/95372#issuecomment-717016660
-		ResyncPeriod: resyncPeriod,
 	}
 
 	// WG to wait for the nodeLabeler goroutine before ending the test. Wait() must be deferred before cancelling the context.

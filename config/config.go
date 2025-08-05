@@ -16,8 +16,9 @@ type Config struct {
 type Entry struct {
 	Interval      time.Duration   `yaml:"interval"`
 	Namespace     string          `yaml:"namespace"`
-	LabelSelector labels.Selector `yaml:"matchExpressions"`
+	LabelSelector labels.Selector `yaml:"labelSelector"`
 	NodeLabel     string          `yaml:"nodeLabel"`
+	ResyncPeriod  time.Duration   `yaml:"resyncPeriod"`
 }
 
 func Read(io.Reader) (*Config, error) {

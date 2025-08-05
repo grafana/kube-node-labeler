@@ -14,7 +14,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	lcorev1 "k8s.io/client-go/listers/core/v1"
 )
 
 type NodeLabeler struct {
@@ -22,36 +21,9 @@ type NodeLabeler struct {
 	Metrics       metrics.Metrics
 	KubeClient    kubernetes.Interface
 	ConfigEntries []*config.Entry
-	ResyncPeriod  time.Duration
 }
 
 func (n *NodeLabeler) Start(ctx context.Context) error {
-	if n.ResyncPeriod == 0 {
-		n.ResyncPeriod = 5 * time.Minute
-		n.Log.Info("Using default resync period", "ResyncPeriod", n.ResyncPeriod)
-	}
-
-	n.Log.Info("Starting informer factory")
-	sif := informers.NewSharedInformerFactory(n.KubeClient, n.ResyncPeriod)
-	defer sif.Shutdown()
-
-	pods := sif.Core().V1().Pods().Lister()
-	nodes := sif.Core().V1().Nodes().Lister()
-
-	sif.Start(ctx.Done())
-
-	n.Log.Info("Waiting for informer factory to sync")
-	waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer waitCancel()
-	for v, syncd := range sif.WaitForCacheSync(waitCtx.Done()) {
-		if !syncd {
-			return fmt.Errorf("%v did not sync", v)
-		}
-
-		n.Log.Debug("Type synced", "type", v)
-	}
-	n.Log.Info("Informer factory sync complete")
-
 	eg := errgroup.Group{}
 	for _, ce := range n.ConfigEntries {
 		n.Log.Info("Creating watcher for nodeLabel", "nodeLabel", ce.NodeLabel)
@@ -60,8 +32,6 @@ func (n *NodeLabeler) Start(ctx context.Context) error {
 			log:        n.Log,
 			metrics:    n.Metrics,
 			kubeClient: n.KubeClient,
-			podLister:  pods,
-			nodeLister: nodes,
 			entry:      ce,
 		}
 
@@ -77,13 +47,38 @@ type watcher struct {
 	log        *slog.Logger
 	metrics    metrics.Metrics
 	kubeClient kubernetes.Interface
-	podLister  lcorev1.PodLister
-	nodeLister lcorev1.NodeLister
 	entry      *config.Entry
 }
 
 func (w *watcher) Start(ctx context.Context) error {
 	log := w.log.With("nodeLabel", w.entry.NodeLabel, "podLabelSelector", w.entry.LabelSelector.String(), "namespace", w.entry.Namespace)
+
+	if w.entry.ResyncPeriod == 0 {
+		w.entry.ResyncPeriod = 5 * time.Minute
+		log.Info("Using default resync period", "ResyncPeriod", w.entry.ResyncPeriod)
+	}
+
+	log.Info("Starting informer factory")
+	sif := informers.NewSharedInformerFactoryWithOptions(w.kubeClient, w.entry.ResyncPeriod, informers.WithNamespace(w.entry.Namespace))
+	defer sif.Shutdown()
+
+	pods := sif.Core().V1().Pods().Lister()
+	nodes := sif.Core().V1().Nodes().Lister()
+
+	sif.Start(ctx.Done())
+
+	log.Info("Waiting for informer factory to sync")
+	waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer waitCancel()
+	for v, syncd := range sif.WaitForCacheSync(waitCtx.Done()) {
+		if !syncd {
+			return fmt.Errorf("%v did not sync", v)
+		}
+
+		log.Debug("Type synced", "type", v)
+	}
+
+	log.Info("Informer factory sync complete")
 
 	w.metrics.IterationPeriod.WithLabelValues(w.entry.NodeLabel).Set(w.entry.Interval.Seconds())
 
@@ -104,7 +99,7 @@ func (w *watcher) Start(ctx context.Context) error {
 			log.Debug("Listing pods in ns")
 			// TODO: I'm unsure whether this operation will scale. The list is namespaced, but the SharedInformerFactory
 			// is not. This is hard to figure out from the code, so I guess we'll need to FAFO.
-			pods, err := w.podLister.Pods(w.entry.Namespace).List(w.entry.LabelSelector)
+			pods, err := pods.Pods(w.entry.Namespace).List(w.entry.LabelSelector)
 			if err != nil {
 				return fmt.Errorf("listing pods: %w", err)
 			}
@@ -118,7 +113,7 @@ func (w *watcher) Start(ctx context.Context) error {
 			log.Debug("Computed nodes that should have label", "numNodes", len(shouldHaveLabel))
 
 			log.Debug("Listing nodes")
-			nodes, err := w.nodeLister.List(labels.Everything())
+			nodes, err := nodes.List(labels.Everything())
 			if err != nil {
 				return fmt.Errorf("listing nodes: %w", err)
 			}
