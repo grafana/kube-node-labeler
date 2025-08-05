@@ -97,7 +97,8 @@ func testMigratingPodSequence(t *testing.T, fakeCS bool) {
 
 	const testLabel = "interesting-node"
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})).With("test", t.Name())
+
 	nl := kubenodelabeler.NodeLabeler{
 		Log:        log,
 		Metrics:    metrics.New(prometheus.NewRegistry()),
