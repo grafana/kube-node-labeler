@@ -70,7 +70,7 @@ func run() error {
 
 	nl := &kubenodelabeler.NodeLabeler{
 		Log:           log,
-		Metrics:       metrics.New(prometheus.NewRegistry()), // FIXME: Pass prometheus registry
+		Metrics:       metrics.New(reg),
 		KubeClient:    clientset,
 		ConfigEntries: cfg.Entries,
 	}
