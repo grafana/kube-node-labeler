@@ -1,4 +1,4 @@
-package kubenodelabeler
+package watcher
 
 import (
 	"context"
@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/grafana/kube-node-labeler/config"
-	"github.com/grafana/kube-node-labeler/metrics"
+	"github.com/grafana/kube-node-labeler/pkg/config"
+	"github.com/grafana/kube-node-labeler/pkg/metrics"
 	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,7 +18,7 @@ import (
 
 type NodeLabeler struct {
 	Log           *slog.Logger
-	Metrics       metrics.Metrics
+	Metrics       *metrics.Metrics
 	KubeClient    kubernetes.Interface
 	ConfigEntries []*config.Entry
 }
@@ -45,7 +45,7 @@ func (n *NodeLabeler) Start(ctx context.Context) error {
 
 type watcher struct {
 	log        *slog.Logger
-	metrics    metrics.Metrics
+	metrics    *metrics.Metrics
 	kubeClient kubernetes.Interface
 	entry      *config.Entry
 }
@@ -80,7 +80,7 @@ func (w *watcher) Start(ctx context.Context) error {
 
 	log.Info("Informer factory sync complete")
 
-	w.metrics.IterationPeriod.WithLabelValues(w.entry.NodeLabel).Set(w.entry.Interval.Seconds())
+	w.metrics.MarkWatcherTickerInterval(w.entry.NodeLabel, w.entry.Interval)
 
 	log.Info("Starting target node watcher")
 
@@ -94,7 +94,7 @@ func (w *watcher) Start(ctx context.Context) error {
 
 			itStart := time.Now()
 
-			w.metrics.Iterations.WithLabelValues(w.entry.NodeLabel).Inc()
+			w.metrics.MarkIteration(w.entry.NodeLabel)
 
 			log.Debug("Listing pods in ns")
 			// TODO: I'm unsure whether this operation will scale. The list is namespaced, but the SharedInformerFactory
@@ -132,7 +132,7 @@ func (w *watcher) Start(ctx context.Context) error {
 					continue
 				}
 
-				w.metrics.LabelOperations.WithLabelValues(w.entry.NodeLabel).Inc()
+				w.metrics.MarkLabelOperation(w.entry.NodeLabel)
 
 				// TODO: The update operations below may fail if a different controller modifies the node in this short
 				// time. In this case, the error will be treated as fatal and the controller will restart. This is
@@ -157,8 +157,8 @@ func (w *watcher) Start(ctx context.Context) error {
 				}
 			}
 
-			w.metrics.LabeledNodes.WithLabelValues(w.entry.NodeLabel).Set(float64(len(shouldHaveLabel)) / float64(len(nodes)))
-			w.metrics.IterationTime.WithLabelValues(w.entry.NodeLabel).Observe(float64(time.Since(itStart).Seconds()))
+			w.metrics.MarkPodsLabeledRatio(w.entry.NodeLabel, len(shouldHaveLabel), len(pods))
+			w.metrics.MarkIterationComplete(w.entry.NodeLabel, time.Since(itStart))
 		}
 	}
 }
