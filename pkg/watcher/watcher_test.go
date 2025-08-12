@@ -1,4 +1,4 @@
-package kubenodelabeler_test
+package watcher_test
 
 import (
 	"context"
@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	kubenodelabeler "github.com/grafana/kube-node-labeler"
-	"github.com/grafana/kube-node-labeler/config"
-	"github.com/grafana/kube-node-labeler/metrics"
+	"github.com/grafana/kube-node-labeler/pkg/config"
+	"github.com/grafana/kube-node-labeler/pkg/metrics"
+	"github.com/grafana/kube-node-labeler/pkg/watcher"
 	"github.com/prometheus/client_golang/prometheus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -99,7 +99,7 @@ func testMigratingPodSequence(t *testing.T, fakeCS bool) {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})).With("test", t.Name())
 
-	nl := kubenodelabeler.NodeLabeler{
+	nl := watcher.NodeLabeler{
 		Log:        log,
 		Metrics:    metrics.New(prometheus.NewRegistry()),
 		KubeClient: cs,

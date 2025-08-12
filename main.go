@@ -11,10 +11,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	kubenodelabeler "github.com/grafana/kube-node-labeler"
-	"github.com/grafana/kube-node-labeler/config"
-	"github.com/grafana/kube-node-labeler/metrics"
-	"github.com/prometheus/client_golang/prometheus"
+	"github.com/grafana/kube-node-labeler/pkg/config"
+	"github.com/grafana/kube-node-labeler/pkg/metrics"
+	"github.com/grafana/kube-node-labeler/pkg/watcher"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/client-go/kubernetes"
@@ -62,15 +61,15 @@ func run() error {
 		return fmt.Errorf("creating clientset: %w", err)
 	}
 
-	reg := prometheus.NewRegistry()
+	reg := metrics.NewRegistry()
 	handler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", handler)
 
-	nl := &kubenodelabeler.NodeLabeler{
+	nl := &watcher.NodeLabeler{
 		Log:           log,
-		Metrics:       metrics.New(prometheus.NewRegistry()), // FIXME: Pass prometheus registry
+		Metrics:       metrics.New(reg),
 		KubeClient:    clientset,
 		ConfigEntries: cfg.Entries,
 	}
