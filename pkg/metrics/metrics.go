@@ -9,6 +9,8 @@ import (
 
 // Metrics contains the registered metrics for the labeler.
 // Please remember to add them to `New` when you add new fields, otherwise you will cause nil panics.
+//
+// A nil *Metrics is valid: it acts as a no-op.
 type Metrics struct {
 	iterations      prometheus.CounterVec   // Iterations, per entry
 	iterationTime   prometheus.HistogramVec // Time each iteration takes, per entry
@@ -20,24 +22,34 @@ type Metrics struct {
 // We use functions rather than accessing the fields so when we change labels, we will break compilation.
 
 func (m *Metrics) MarkIteration(nodeLabel string) {
-	m.iterations.WithLabelValues(nodeLabel).Inc()
+	if m != nil {
+		m.iterations.WithLabelValues(nodeLabel).Inc()
+	}
 }
 
 func (m *Metrics) MarkWatcherTickerInterval(nodeLabel string, interval time.Duration) {
-	m.iterationPeriod.WithLabelValues(nodeLabel).Set(float64(interval.Seconds()))
+	if m != nil {
+		m.iterationPeriod.WithLabelValues(nodeLabel).Set(float64(interval.Seconds()))
+	}
 }
 
 func (m *Metrics) MarkIterationComplete(nodeLabel string, duration time.Duration) {
-	m.iterationTime.WithLabelValues(nodeLabel).Observe(float64(duration.Seconds()))
+	if m != nil {
+		m.iterationTime.WithLabelValues(nodeLabel).Observe(float64(duration.Seconds()))
+	}
 }
 
 func (m *Metrics) MarkPodsLabeledRatio(nodeLabel string, labeled, total int) {
-	ratio := float64(labeled) / float64(total)
-	m.labeledNodes.WithLabelValues(nodeLabel).Set(ratio)
+	if m != nil {
+		ratio := float64(labeled) / float64(total)
+		m.labeledNodes.WithLabelValues(nodeLabel).Set(ratio)
+	}
 }
 
 func (m *Metrics) MarkLabelOperation(nodeLabel string) {
-	m.labelOperations.WithLabelValues(nodeLabel).Inc()
+	if m != nil {
+		m.labelOperations.WithLabelValues(nodeLabel).Inc()
+	}
 }
 
 const (
