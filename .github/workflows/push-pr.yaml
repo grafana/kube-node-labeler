@@ -43,7 +43,7 @@ jobs:
           go-version-file: go.mod
       - name: Build
         run: |
-          go build -o app ./cmd
+          go build -o app .
       - name: Test
         env:
           PLATFORM: ${{ matrix.platform}}
