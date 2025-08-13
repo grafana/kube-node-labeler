@@ -25,33 +25,26 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
-      # TODO: Maybe kwok would be better for this.
-      # https://kwok.sigs.k8s.io/docs/user/github-action/
-      - name: Setup Minikube
-        uses: manusa/actions-setup-minikube@b589f2d61bf96695c546929c72b38563e856059d # v2.14.0
-        if: ${{ !contains(matrix.platform, 'arm') }} # Minikube only works on amd
-        with:
-          # Renovate interacts with the two lines below. Please keep their formatting as it is.
-          # TODO: Actually create renovate rules for these.
-          minikube version: v1.36.0
-          kubernetes version: v1.33.3
-          driver: docker # Needed for multi-node cluster.
-          start args: --nodes=3
-          github token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
         with:
           go-version-file: go.mod
+
       - name: Build
-        run: |
-          go build -o app .
+        run: go build -o app .
+
+      - uses: kubernetes-sigs/kwok@main
+        with:
+          command: kwokctl
+      - run: kwokctl create cluster
+        env:
+          # Please keep this in sync with the devenv/kwok/docker-compose file
+          KWOK_KUBE_VERSION: v1.33.0
       - name: Test
         env:
           PLATFORM: ${{ matrix.platform}}
         run: |
-          if [[ "$PLATFORM" != *arm* ]]; then
-            # Minikube only works on amd
-            export TEST_KUBECONFIG="${HOME}/.kube/config"
-          fi
+          # Minikube only works on amd
+          export TEST_KUBECONFIG="${HOME}/.kube/config"
           go test -count=1 ./...
 
   build-container:
