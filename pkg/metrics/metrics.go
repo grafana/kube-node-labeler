@@ -1,55 +1,18 @@
 package metrics
 
 import (
-	"time"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 )
 
 // Metrics contains the registered metrics for the labeler.
 // Please remember to add them to `New` when you add new fields, otherwise you will cause nil panics.
-//
-// A nil *Metrics is valid: it acts as a no-op.
 type Metrics struct {
-	iterations      prometheus.CounterVec   // Iterations, per entry
-	iterationTime   prometheus.HistogramVec // Time each iteration takes, per entry
-	iterationPeriod prometheus.GaugeVec     // How often the watcher of a each node_label will tick
-	labelOperations prometheus.CounterVec   // Labels added/removed, per entry and maybe op (add/remove)
-	labeledNodes    prometheus.GaugeVec     // % of nodes labeled
-}
-
-// We use functions rather than accessing the fields so when we change labels, we will break compilation.
-
-func (m *Metrics) MarkIteration(nodeLabel string) {
-	if m != nil {
-		m.iterations.WithLabelValues(nodeLabel).Inc()
-	}
-}
-
-func (m *Metrics) MarkWatcherTickerInterval(nodeLabel string, interval time.Duration) {
-	if m != nil {
-		m.iterationPeriod.WithLabelValues(nodeLabel).Set(float64(interval.Seconds()))
-	}
-}
-
-func (m *Metrics) MarkIterationComplete(nodeLabel string, duration time.Duration) {
-	if m != nil {
-		m.iterationTime.WithLabelValues(nodeLabel).Observe(float64(duration.Seconds()))
-	}
-}
-
-func (m *Metrics) MarkPodsLabeledRatio(nodeLabel string, labeled, total int) {
-	if m != nil {
-		ratio := float64(labeled) / float64(total)
-		m.labeledNodes.WithLabelValues(nodeLabel).Set(ratio)
-	}
-}
-
-func (m *Metrics) MarkLabelOperation(nodeLabel string) {
-	if m != nil {
-		m.labelOperations.WithLabelValues(nodeLabel).Inc()
-	}
+	Iterations      prometheus.CounterVec   // Iterations, per entry
+	IterationTime   prometheus.HistogramVec // Time each iteration takes, per entry
+	IterationPeriod prometheus.GaugeVec     // How often the watcher of a each node_label will tick
+	LabelOperations prometheus.CounterVec   // Labels added/removed, per entry and maybe op (add/remove)
+	LabeledNodes    prometheus.GaugeVec     // % of nodes labeled
 }
 
 const (
@@ -72,33 +35,33 @@ func NewRegistry() *prometheus.Registry {
 // This will panic if called twice on the same registry!
 func New(reg *prometheus.Registry) *Metrics {
 	m := &Metrics{
-		iterations: *prometheus.NewCounterVec(prometheus.CounterOpts{
+		Iterations: *prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: ns,
 			Name:      "iterations_total",
 		}, []string{nodeLabelLabel}),
-		iterationTime: *prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		IterationTime: *prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: ns,
 			Name:      "iteration_time_seconds",
 		}, []string{nodeLabelLabel}),
-		iterationPeriod: *prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		IterationPeriod: *prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: ns,
 			Name:      "iteration_period_seconds",
 		}, []string{nodeLabelLabel}),
-		labelOperations: *prometheus.NewCounterVec(prometheus.CounterOpts{
+		LabelOperations: *prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: ns,
 			Name:      "label_operations_total",
 		}, []string{nodeLabelLabel}),
-		labeledNodes: *prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		LabeledNodes: *prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: ns,
 			Name:      "labeled_nodes_fraction",
 		}, []string{nodeLabelLabel}),
 	}
 
-	reg.MustRegister(m.iterations)
-	reg.MustRegister(m.iterationTime)
-	reg.MustRegister(m.iterationPeriod)
-	reg.MustRegister(m.labelOperations)
-	reg.MustRegister(m.labeledNodes)
+	reg.MustRegister(m.Iterations)
+	reg.MustRegister(m.IterationTime)
+	reg.MustRegister(m.IterationPeriod)
+	reg.MustRegister(m.LabelOperations)
+	reg.MustRegister(m.LabeledNodes)
 
 	return m
 }

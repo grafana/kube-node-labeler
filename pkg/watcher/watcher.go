@@ -80,7 +80,7 @@ func (w *watcher) Start(ctx context.Context) error {
 
 	log.Info("Informer factory sync complete")
 
-	w.metrics.MarkWatcherTickerInterval(w.entry.NodeLabel, w.entry.Interval)
+	w.metrics.IterationPeriod.WithLabelValues(w.entry.NodeLabel).Set(float64(w.entry.Interval.Seconds()))
 
 	log.Info("Starting target node watcher")
 
@@ -94,7 +94,7 @@ func (w *watcher) Start(ctx context.Context) error {
 
 			itStart := time.Now()
 
-			w.metrics.MarkIteration(w.entry.NodeLabel)
+			w.metrics.Iterations.WithLabelValues(w.entry.NodeLabel).Inc()
 
 			log.Debug("Listing pods in ns")
 			// TODO: I'm unsure whether this operation will scale. The list is namespaced, but the SharedInformerFactory
@@ -132,7 +132,7 @@ func (w *watcher) Start(ctx context.Context) error {
 					continue
 				}
 
-				w.metrics.MarkLabelOperation(w.entry.NodeLabel)
+				w.metrics.LabelOperations.WithLabelValues(w.entry.NodeLabel).Inc()
 
 				// TODO: The update operations below may fail if a different controller modifies the node in this short
 				// time. In this case, the error will be treated as fatal and the controller will restart. This is
@@ -157,8 +157,8 @@ func (w *watcher) Start(ctx context.Context) error {
 				}
 			}
 
-			w.metrics.MarkPodsLabeledRatio(w.entry.NodeLabel, len(shouldHaveLabel), len(pods))
-			w.metrics.MarkIterationComplete(w.entry.NodeLabel, time.Since(itStart))
+			w.metrics.LabeledNodes.WithLabelValues(w.entry.NodeLabel).Set(float64(len(shouldHaveLabel)) / float64(len(nodes)))
+			w.metrics.IterationTime.WithLabelValues(w.entry.NodeLabel).Observe(float64(time.Since(itStart).Seconds()))
 		}
 	}
 }
