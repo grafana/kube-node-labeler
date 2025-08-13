@@ -3,12 +3,9 @@ package watcher_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
-	"strings"
-	"sync"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -16,6 +13,8 @@ import (
 	"github.com/grafana/kube-node-labeler/pkg/metrics"
 	"github.com/grafana/kube-node-labeler/pkg/watcher"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	acorev1 "k8s.io/client-go/applyconfigurations/core/v1"
@@ -24,259 +23,189 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-func TestKubeNodeLabeler(t *testing.T) {
+func init() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+}
+
+func TestWatcher(t *testing.T) {
 	t.Parallel()
 
-	t.Run("with kubernetes fake clientset", func(t *testing.T) {
-		t.Parallel()
-		testMigratingPodSequence(t, true)
-	})
-
-	t.Run("with TEST_KUBECONFIG", func(t *testing.T) {
-		t.Parallel()
-
-		kc := os.Getenv("TEST_KUBECONFIG")
-		if kc == "" {
-			t.Skipf("Skipping test against real cluster as TEST_KUBECONFIG is not defined")
-		}
-
-		testMigratingPodSequence(t, false)
-	})
+	testWatcherLabelOperations(t, fake.NewClientset())
 }
 
-// testMigratingPodSequence tests the main controller loop by creating an initial state with a target pod on a known
-// node, and then moving the pod somewhere else, checking after both steps that the nodes are labeled as they should.
-//
-// The magic fakeCS boolean tweaks the test either towards the kubernetes fake client (if true), or towards a real-ish
-// cluster. For the fake client, the test gives less time for the (non-existent) cluster to initialize, and causes it
-// to create node objects.
-func testMigratingPodSequence(t *testing.T, fakeCS bool) {
-	var cs kubernetes.Interface
-
-	if fakeCS {
-		cs = fake.NewClientset()
-	} else {
-		kc, err := os.ReadFile(os.Getenv("TEST_KUBECONFIG"))
-		if err != nil {
-			t.Fatalf("cannot read kubeconfig from TEST_KUBECONFIG: %v", err)
-		}
-
-		rest, err := clientcmd.RESTConfigFromKubeConfig(kc)
-		if err != nil {
-			t.Fatalf("creating kubernetes rest config: %v", err)
-		}
-
-		if os.Getenv("TEST_KUBE_LOG") != "" {
-			rest.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
-				return logRoundTripper{inner: rt, log: *slog.Default()}
-			}
-		}
-
-		cs, err = kubernetes.NewForConfig(rest)
-		if err != nil {
-			t.Fatalf("creating kubernetes client: %v", err)
-		}
+func TestWatcherOnCluster(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping watcher test in short mode")
+	}
+	kubeConfig := os.Getenv("TEST_KUBECONFIG")
+	if kubeConfig == "" {
+		t.Skip("TEST_KUBECONFIG not set, skipping watcher test")
+	}
+	if !filepath.IsAbs(kubeConfig) {
+		t.Fatalf("TEST_KUBECONFIG must be an absolute path, got: %s", kubeConfig)
 	}
 
-	// Timings for the test.
-	nlInterval := time.Second
-	// Informers interact weirdly with the k8s fake client. Work around that by making them poll very often.
-	// Ref: https://github.com/kubernetes/kubernetes/issues/95372#issuecomment-717016660
-	resyncPeriod := 400 * time.Millisecond
-	reconcileTime := 1500 * time.Millisecond
-	if !fakeCS {
-		// We're working with a real cluster, be friendlier and/or more lenient
-		nlInterval = 3 * time.Second
-		// Purposefully beyond test time, to test watchers work correctly.
-		resyncPeriod = 10 * time.Minute
-		// This includes the time to create and delete pods, which is slow.
-		reconcileTime = 7 * time.Second
+	t.Parallel()
+
+	contents, err := os.ReadFile(kubeConfig)
+	require.NoError(t, err, "could not read kubeconfig at: %s", kubeConfig)
+
+	restConfig, err := clientcmd.RESTConfigFromKubeConfig(contents)
+	require.NoError(t, err, "could not create REST config from kubeconfig at: %s", kubeConfig)
+
+	client, err := kubernetes.NewForConfig(restConfig)
+	require.NoError(t, err, "could not create k8s client")
+
+	testWatcherLabelOperations(t, client)
+}
+
+func testWatcherLabelOperations(t testing.TB, client kubernetes.Interface) {
+	logger := slog.With("test", t.Name())
+	metrics := metrics.New(prometheus.NewRegistry())
+	config := &config.Entry{
+		Interval:      time.Millisecond * 10,
+		Namespace:     "default",
+		LabelSelector: selector(t, "grafana.net/interesting=true"),
+		NodeLabel:     "grafana.net/look-at-me",
+		ResyncPeriod:  time.Millisecond * 200,
 	}
 
-	const testns = "test"
-
-	const testLabel = "interesting-node"
-
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})).With("test", t.Name())
-
-	nl := watcher.NodeLabeler{
-		Log:        log,
-		Metrics:    metrics.New(prometheus.NewRegistry()),
-		KubeClient: cs,
-		ConfigEntries: []*config.Entry{
-			{
-				Interval:      nlInterval,
-				Namespace:     testns,
-				LabelSelector: selector(t, "app.k8s.io/name=pod1"),
-				NodeLabel:     testLabel,
-				ResyncPeriod:  resyncPeriod,
-			},
-		},
-	}
-
-	// WG to wait for the nodeLabeler goroutine before ending the test. Wait() must be deferred before cancelling the context.
-	nlWg := &sync.WaitGroup{}
-	defer nlWg.Wait()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	nlWg.Add(1)
+	watcher, err := watcher.NewNamespacedWatcher(logger, metrics, client, config)
+	require.NoError(t, err, "failed to create watcher")
+	// We need to start the informer such that it can receive updates about what's going on in the client.
 	go func() {
-		defer nlWg.Done()
-		err := nl.Start(ctx)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			t.Errorf("nodelabeler returned an error: %v", err)
-			t.Fail()
+		err := watcher.StartInformerBlocking(t.Context())
+		if errors.Is(err, context.Canceled) {
+			return
 		}
+		require.NoError(t, err, "watcher returned an error")
 	}()
 
-	if fakeCS {
-		t.Log("Running on the fake client, creating starting nodes")
-		for _, name := range []string{"node1", "node2", "node3"} {
-			createNode(t, cs, name)
-		}
-	}
+	// Do a first tick: this should do nothing as there are no nodes or pods.
+	require.NoError(t, watcher.Tick(t.Context()), "tick failed with no nodes or pods")
 
-	nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("Listing nodes: %v", err)
-	}
+	// Now, we'll introduce the nodes in the story. They should still have no labels.
+	_, err = client.CoreV1().Nodes().Apply(t.Context(), acorev1.Node("node1"), metav1.ApplyOptions{FieldManager: t.Name()})
+	require.NoError(t, err, "failed to create node")
+	_, err = client.CoreV1().Nodes().Apply(t.Context(), acorev1.Node("node2"), metav1.ApplyOptions{FieldManager: t.Name()})
+	require.NoError(t, err, "failed to create node")
+	_, err = client.CoreV1().Nodes().Apply(t.Context(), acorev1.Node("node3"), metav1.ApplyOptions{FieldManager: t.Name()})
+	require.NoError(t, err, "failed to create node")
 
-	if len(nodes.Items) != 3 {
-		t.Fatalf("This test must be run on a cluster with 3 nodes, found: %d", len(nodes.Items))
-	}
+	require.NoError(t, watcher.Tick(t.Context()), "tick failed with 3 nodes and no pods")
+	require.Empty(t, labelsOfNode(t, client, "node1"), "node1 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, "node2"), "node2 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, "node3"), "node3 should not have any labels")
 
-	t.Log("Creating test namespace")
-	_, err = cs.CoreV1().Namespaces().Apply(ctx, acorev1.Namespace(testns), metav1.ApplyOptions{FieldManager: testFM})
-	if err != nil {
-		t.Fatalf("cannot create test namespace %q: %v", testns, err)
-	}
+	// Adding the namespace should likewise do nothing.
+	_, err = client.CoreV1().Namespaces().Apply(t.Context(), acorev1.Namespace("default"), metav1.ApplyOptions{FieldManager: t.Name()})
+	require.NoError(t, err, "failed to create namespace")
 
-	defer func() {
-		t.Log("Deleting test namespace")
-		err := cs.CoreV1().Namespaces().Delete(ctx, testns, metav1.DeleteOptions{})
-		if err != nil {
-			t.Fatalf("cannot create test namespace %q: %v", testns, err)
-		}
-	}()
+	require.NoError(t, watcher.Tick(t.Context()), "tick failed with 3 nodes, no pods, and a single namespace")
+	require.Empty(t, labelsOfNode(t, client, "node1"), "node1 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, "node2"), "node2 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, "node3"), "node3 should not have any labels")
 
-	t.Log("Creating pods")
-
-	podNames := []string{"pod1", "pod2", "pod3"} // One per node.
-	for i, node := range nodes.Items {
-		createPodInNode(t, cs, podNames[i], node.Name, testns)
-	}
-
-	// Give our controller time to reconcile.
-	time.Sleep(reconcileTime)
-
-	// Check label presence
-	for node, shouldHaveLabel := range map[string]bool{
-		nodes.Items[0].Name: true, // pod1 matches the label, thus node1 should be interesting now
-		nodes.Items[1].Name: false,
-		nodes.Items[2].Name: false,
-	} {
-		node, err := cs.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
-		if err != nil {
-			t.Fatalf("getting node: %v", err)
-		}
-
-		if _, hasLabel := node.Labels[testLabel]; hasLabel != shouldHaveLabel {
-			t.Fatalf("expected hasLabel=%v for %q, but got %v", shouldHaveLabel, node, hasLabel)
-		}
-	}
-
-	t.Log("Removing interesting pod")
-
-	err = cs.CoreV1().Pods(testns).Delete(ctx, "pod1", metav1.DeleteOptions{})
-	if err != nil {
-		t.Fatalf("deleting pod: %v", err)
-	}
-
-	// Give our controller time to reconcile.
-	time.Sleep(reconcileTime)
-
-	// Check label presence
-	for node, shouldHaveLabel := range map[string]bool{
-		nodes.Items[0].Name: false, // Interesting pod deleted, all nodes should be unlabeled.
-		nodes.Items[1].Name: false,
-		nodes.Items[2].Name: false,
-	} {
-		node, err := cs.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
-		if err != nil {
-			t.Fatalf("getting node: %v", err)
-		}
-
-		if _, hasLabel := node.Labels[testLabel]; hasLabel != shouldHaveLabel {
-			t.Fatalf("expected hasLabel=%v for %q, but got %v", shouldHaveLabel, node, hasLabel)
-		}
-	}
-
-	t.Log("Creating interesting pod elsewhere")
-
-	createPodInNode(t, cs, podNames[0], nodes.Items[2].Name, testns)
-
-	// Give our controller time to reconcile.
-	time.Sleep(reconcileTime)
-
-	// Check label presence
-	for node, shouldHaveLabel := range map[string]bool{
-		nodes.Items[0].Name: false,
-		nodes.Items[1].Name: false,
-		nodes.Items[2].Name: true, // Interesting pod moved here.
-	} {
-		node, err := cs.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
-		if err != nil {
-			t.Fatalf("getting node: %v", err)
-		}
-
-		if _, hasLabel := node.Labels[testLabel]; hasLabel != shouldHaveLabel {
-			t.Fatalf("expected hasLabel=%v for %q, but got %v", shouldHaveLabel, node, hasLabel)
-		}
-	}
-}
-
-const testFM = "node-manager-test"
-
-func createNode(t *testing.T, cs kubernetes.Interface, name string) {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	t.Cleanup(cancel)
-	_, err := cs.CoreV1().Nodes().Apply(ctx, acorev1.Node(name), metav1.ApplyOptions{FieldManager: testFM})
-	if err != nil {
-		t.Fatalf("creating %q: %v", name, err)
-	}
-}
-
-func createPodInNode(t *testing.T, cs kubernetes.Interface, pod, node, ns string) {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	t.Cleanup(cancel)
-
-	_, err := cs.CoreV1().Pods(ns).Apply(ctx,
-		acorev1.Pod(pod, ns).
-			WithLabels(map[string]string{"app.k8s.io/name": pod}).
-			WithSpec(
-				acorev1.PodSpec().
-					WithNodeName(node).
-					WithTerminationGracePeriodSeconds(1).
-					WithContainers(
-						acorev1.Container().
-							WithName(pod).
-							WithImage("alpine:latest").
-							WithCommand("/bin/false"),
-					),
+	// And when we add a pod that is not relevant, again, we should see that nothing happens.
+	_, err = client.CoreV1().Pods("default").Apply(t.Context(),
+		acorev1.Pod("unlabeled-pod", "default").
+			WithSpec(acorev1.PodSpec().
+				WithNodeName("node1").
+				WithContainers(crashingContainer()),
 			),
-		metav1.ApplyOptions{FieldManager: testFM})
-	if err != nil {
-		t.Fatalf("creating %s/%s in %s: %v", ns, pod, node, err)
-	}
+		metav1.ApplyOptions{FieldManager: t.Name()})
+	require.NoError(t, err, "failed to create unlabelled pod")
+
+	require.NoError(t, watcher.Tick(t.Context()), "tick failed with 3 nodes and an unlabelled pod")
+	require.Empty(t, labelsOfNode(t, client, "node1"), "node1 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, "node2"), "node2 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, "node3"), "node3 should not have any labels")
+
+	// Only when we add one that we say is interesting, should we notice something.
+	_, err = client.CoreV1().Pods("default").Apply(t.Context(),
+		acorev1.Pod("labeled-pod", "default").
+			WithLabels(map[string]string{"grafana.net/interesting": "true"}).
+			WithSpec(acorev1.PodSpec().
+				WithNodeName("node2").
+				WithContainers(longRunningContainer())),
+		metav1.ApplyOptions{FieldManager: t.Name()})
+	require.NoError(t, err, "failed to create labeled pod")
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		pod, err := client.CoreV1().Pods("default").Get(t.Context(), "labeled-pod", metav1.GetOptions{})
+		if assert.NoError(collect, err, "failed getting pod") {
+			assert.Contains(collect, pod.Labels, "grafana.net/interesting", "pod should have the label")
+		}
+	}, 5*time.Second, time.Millisecond*50)
+
+	require.NoError(t, watcher.Tick(t.Context()), "tick failed with 3 nodes and a labeled pod")
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		assert.Empty(collect, labelsOfNode(t, client, "node1"), "node1 should not have any labels")
+		assert.Equal(collect, map[string]string{"grafana.net/look-at-me": "true"}, labelsOfNode(t, client, "node2"), "node2 should have the label")
+		assert.Empty(collect, labelsOfNode(t, client, "node3"), "node3 should not have any labels")
+	}, 5*time.Second, time.Millisecond*50)
+
+	// Let's remove it, and see that the node is unlabeled.
+	err = client.CoreV1().Pods("default").Delete(t.Context(), "labeled-pod", metav1.DeleteOptions{})
+	require.NoError(t, err, "failed to delete labeled pod")
+
+	require.NoError(t, watcher.Tick(t.Context()), "tick failed with 3 nodes and a deleted pod")
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		assert.Empty(collect, labelsOfNode(t, client, "node1"), "node1 should not have any labels")
+		assert.Empty(collect, labelsOfNode(t, client, "node2"), "node2 should not have any labels")
+		assert.Empty(collect, labelsOfNode(t, client, "node3"), "node3 should not have any labels")
+	}, 5*time.Second, time.Millisecond*50)
+
+	// And if we pretend as if Kubernetes reschedules it on another node (node3 in this case), we'll see it occurs there, too.
+	_, err = client.CoreV1().Pods("default").Apply(t.Context(),
+		acorev1.Pod("labeled-pod", "default").
+			WithLabels(map[string]string{"grafana.net/interesting": "true"}).
+			WithSpec(acorev1.PodSpec().
+				WithNodeName("node3").
+				WithContainers(longRunningContainer())),
+		metav1.ApplyOptions{FieldManager: t.Name()})
+	require.NoError(t, err, "failed to create labeled pod")
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		pod, err := client.CoreV1().Pods("default").Get(t.Context(), "labeled-pod", metav1.GetOptions{})
+		if assert.NoError(collect, err, "failed getting pod") {
+			assert.Contains(collect, pod.Labels, "grafana.net/interesting", "pod should have the label")
+		}
+	}, 5*time.Second, time.Millisecond*50)
+
+	require.NoError(t, watcher.Tick(t.Context()), "tick failed with 3 nodes and a labeled pod")
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		assert.Empty(collect, labelsOfNode(t, client, "node1"), "node1 should not have any labels")
+		assert.Empty(collect, labelsOfNode(t, client, "node2"), "node2 should not have any labels")
+		assert.Equal(collect, map[string]string{"grafana.net/look-at-me": "true"}, labelsOfNode(t, client, "node3"), "node3 should have the label")
+	}, 5*time.Second, time.Millisecond*50)
+
+	// Look at what happens now: we will schedule move the pod on a node that doesn't exist (i.e. in a real K8s setup, it would never schedule).
+	// This should simply remove the label from the old node, as the new pod can't be scheduled.
+	err = client.CoreV1().Pods("default").Delete(t.Context(), "labeled-pod", metav1.DeleteOptions{})
+	require.NoError(t, err, "failed to delete labeled pod")
+	_, err = client.CoreV1().Pods("default").Apply(t.Context(),
+		acorev1.Pod("labeled-pod", "default").
+			WithLabels(map[string]string{"grafana.net/interesting": "true"}).
+			WithSpec(acorev1.PodSpec().
+				WithNodeName("node999").
+				WithContainers(longRunningContainer())),
+		metav1.ApplyOptions{FieldManager: t.Name()})
+	require.NoError(t, err, "failed to create labeled pod")
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		pod, err := client.CoreV1().Pods("default").Get(t.Context(), "labeled-pod", metav1.GetOptions{})
+		if assert.NoError(collect, err, "failed getting pod") {
+			assert.Contains(collect, pod.Labels, "grafana.net/interesting", "pod should have the label")
+		}
+	}, 5*time.Second, time.Millisecond*50)
+
+	require.NoError(t, watcher.Tick(t.Context()), "tick failed with 3 nodes and a labeled pod")
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		assert.Empty(collect, labelsOfNode(t, client, "node1"), "node1 should not have any labels")
+		assert.Empty(collect, labelsOfNode(t, client, "node2"), "node2 should not have any labels")
+		assert.Empty(collect, labelsOfNode(t, client, "node3"), "node3 should not have any labels")
+	}, 5*time.Second, time.Millisecond*50)
 }
 
-func selector(t *testing.T, str string) labels.Selector {
+func selector(t testing.TB, str string) labels.Selector {
 	t.Helper()
 	sel, err := labels.Parse(str)
 	if err != nil {
@@ -286,27 +215,26 @@ func selector(t *testing.T, str string) labels.Selector {
 	return sel
 }
 
-type logRoundTripper struct {
-	log   slog.Logger
-	inner http.RoundTripper
+func labelsOfNode(t testing.TB, cs kubernetes.Interface, node string) map[string]string {
+	t.Helper()
+
+	nodeObj, err := cs.CoreV1().Nodes().Get(t.Context(), node, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("getting node %q: %v", node, err)
+	}
+	return nodeObj.Labels
 }
 
-func (rt logRoundTripper) RoundTrip(r *http.Request) (resp *http.Response, err error) {
-	requestLine := fmt.Sprintf("%s %s", r.Method, r.URL.String())
+func crashingContainer() *acorev1.ContainerApplyConfiguration {
+	return acorev1.Container().
+		WithName("crashing").
+		WithImage("busybox:latest").
+		WithCommand("/bin/false")
+}
 
-	log := rt.log.With()
-	if host := r.Header["Host"]; len(host) > 0 {
-		log = log.With("host", strings.Join(host, ","))
-	}
-
-	log.Info(requestLine, "state", "request")
-
-	resp, err = rt.inner.RoundTrip(r)
-	if err != nil {
-		log.Error(requestLine)
-		return
-	}
-
-	log.Info(requestLine, "state", "response", "statusCode", resp.StatusCode)
-	return
+func longRunningContainer() *acorev1.ContainerApplyConfiguration {
+	return acorev1.Container().
+		WithName("long-running").
+		WithImage("busybox:latest").
+		WithCommand("/bin/sleep", "120")
 }

@@ -1,0 +1,6 @@
+services:
+  kwok:
+    # Please keep the Kubernetes version (the last part of the tag) in sync with .github/workflows/push-pr.yaml
+    image: registry.k8s.io/kwok/cluster:v0.7.0-k8s.v1.33.0
+    ports:
+      - "8080:8080"
