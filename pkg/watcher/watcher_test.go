@@ -60,11 +60,16 @@ func TestWatcherOnCluster(t *testing.T) {
 }
 
 func testWatcherLabelOperations(t testing.TB, client kubernetes.Interface) {
+	t.Helper()
+
+	const NS = "kube-node-labeler-watcher-test"
+	const NODE = "kube-node-labeler-watcher-test-node-"
+
 	logger := slog.With("test", t.Name())
 	metrics := metrics.New(prometheus.NewRegistry())
 	config := &config.Entry{
 		Interval:      time.Millisecond * 10,
-		Namespace:     "default",
+		Namespace:     NS,
 		LabelSelector: selector(t, "grafana.net/interesting=true"),
 		NodeLabel:     "grafana.net/look-at-me",
 		ResyncPeriod:  time.Millisecond * 200,
@@ -85,53 +90,62 @@ func testWatcherLabelOperations(t testing.TB, client kubernetes.Interface) {
 	require.NoError(t, watcher.Tick(t.Context()), "tick failed with no nodes or pods")
 
 	// Now, we'll introduce the nodes in the story. They should still have no labels.
-	_, err = client.CoreV1().Nodes().Apply(t.Context(), acorev1.Node("node1"), metav1.ApplyOptions{FieldManager: t.Name()})
+	t.Cleanup(func() {
+		_ = client.CoreV1().Nodes().Delete(t.Context(), NODE+"1", metav1.DeleteOptions{})
+		_ = client.CoreV1().Nodes().Delete(t.Context(), NODE+"2", metav1.DeleteOptions{})
+		_ = client.CoreV1().Nodes().Delete(t.Context(), NODE+"3", metav1.DeleteOptions{})
+	})
+	_, err = client.CoreV1().Nodes().Apply(t.Context(), acorev1.Node(NODE+"1"), metav1.ApplyOptions{FieldManager: t.Name()})
 	require.NoError(t, err, "failed to create node")
-	_, err = client.CoreV1().Nodes().Apply(t.Context(), acorev1.Node("node2"), metav1.ApplyOptions{FieldManager: t.Name()})
+	_, err = client.CoreV1().Nodes().Apply(t.Context(), acorev1.Node(NODE+"2"), metav1.ApplyOptions{FieldManager: t.Name()})
 	require.NoError(t, err, "failed to create node")
-	_, err = client.CoreV1().Nodes().Apply(t.Context(), acorev1.Node("node3"), metav1.ApplyOptions{FieldManager: t.Name()})
+	_, err = client.CoreV1().Nodes().Apply(t.Context(), acorev1.Node(NODE+"3"), metav1.ApplyOptions{FieldManager: t.Name()})
 	require.NoError(t, err, "failed to create node")
 
 	require.NoError(t, watcher.Tick(t.Context()), "tick failed with 3 nodes and no pods")
-	require.Empty(t, labelsOfNode(t, client, "node1"), "node1 should not have any labels")
-	require.Empty(t, labelsOfNode(t, client, "node2"), "node2 should not have any labels")
-	require.Empty(t, labelsOfNode(t, client, "node3"), "node3 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, NODE+"1"), "node1 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, NODE+"2"), "node2 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, NODE+"3"), "node3 should not have any labels")
 
 	// Adding the namespace should likewise do nothing.
-	_, err = client.CoreV1().Namespaces().Apply(t.Context(), acorev1.Namespace("default"), metav1.ApplyOptions{FieldManager: t.Name()})
+	_, err = client.CoreV1().Namespaces().Apply(t.Context(), acorev1.Namespace(NS), metav1.ApplyOptions{FieldManager: t.Name()})
 	require.NoError(t, err, "failed to create namespace")
+	// If this is a real Kubernetes setup somehow (e.g. kwok, minikube, k3s), deleting the namespace should be enough to remove any pods inside. So we don't need to clean those up.
+	t.Cleanup(func() {
+		_ = client.CoreV1().Namespaces().Delete(t.Context(), NS, metav1.DeleteOptions{})
+	})
 
 	require.NoError(t, watcher.Tick(t.Context()), "tick failed with 3 nodes, no pods, and a single namespace")
-	require.Empty(t, labelsOfNode(t, client, "node1"), "node1 should not have any labels")
-	require.Empty(t, labelsOfNode(t, client, "node2"), "node2 should not have any labels")
-	require.Empty(t, labelsOfNode(t, client, "node3"), "node3 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, NODE+"1"), "node1 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, NODE+"2"), "node2 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, NODE+"3"), "node3 should not have any labels")
 
 	// And when we add a pod that is not relevant, again, we should see that nothing happens.
-	_, err = client.CoreV1().Pods("default").Apply(t.Context(),
-		acorev1.Pod("unlabeled-pod", "default").
+	_, err = client.CoreV1().Pods(NS).Apply(t.Context(),
+		acorev1.Pod("unlabeled-pod", NS).
 			WithSpec(acorev1.PodSpec().
-				WithNodeName("node1").
+				WithNodeName(NODE+"1").
 				WithContainers(crashingContainer()),
 			),
 		metav1.ApplyOptions{FieldManager: t.Name()})
 	require.NoError(t, err, "failed to create unlabelled pod")
 
 	require.NoError(t, watcher.Tick(t.Context()), "tick failed with 3 nodes and an unlabelled pod")
-	require.Empty(t, labelsOfNode(t, client, "node1"), "node1 should not have any labels")
-	require.Empty(t, labelsOfNode(t, client, "node2"), "node2 should not have any labels")
-	require.Empty(t, labelsOfNode(t, client, "node3"), "node3 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, NODE+"1"), "node1 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, NODE+"2"), "node2 should not have any labels")
+	require.Empty(t, labelsOfNode(t, client, NODE+"3"), "node3 should not have any labels")
 
 	// Only when we add one that we say is interesting, should we notice something.
-	_, err = client.CoreV1().Pods("default").Apply(t.Context(),
-		acorev1.Pod("labeled-pod", "default").
+	_, err = client.CoreV1().Pods(NS).Apply(t.Context(),
+		acorev1.Pod("labeled-pod", NS).
 			WithLabels(map[string]string{"grafana.net/interesting": "true"}).
 			WithSpec(acorev1.PodSpec().
-				WithNodeName("node2").
+				WithNodeName(NODE+"2").
 				WithContainers(longRunningContainer())),
 		metav1.ApplyOptions{FieldManager: t.Name()})
 	require.NoError(t, err, "failed to create labeled pod")
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		pod, err := client.CoreV1().Pods("default").Get(t.Context(), "labeled-pod", metav1.GetOptions{})
+		pod, err := client.CoreV1().Pods(NS).Get(t.Context(), "labeled-pod", metav1.GetOptions{})
 		if assert.NoError(collect, err, "failed getting pod") {
 			assert.Contains(collect, pod.Labels, "grafana.net/interesting", "pod should have the label")
 		}
@@ -139,33 +153,33 @@ func testWatcherLabelOperations(t testing.TB, client kubernetes.Interface) {
 
 	require.NoError(t, watcher.Tick(t.Context()), "tick failed with 3 nodes and a labeled pod")
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		assert.Empty(collect, labelsOfNode(t, client, "node1"), "node1 should not have any labels")
-		assert.Equal(collect, map[string]string{"grafana.net/look-at-me": "true"}, labelsOfNode(t, client, "node2"), "node2 should have the label")
-		assert.Empty(collect, labelsOfNode(t, client, "node3"), "node3 should not have any labels")
+		assert.Empty(collect, labelsOfNode(t, client, NODE+"1"), "node1 should not have any labels")
+		assert.Equal(collect, map[string]string{"grafana.net/look-at-me": "true"}, labelsOfNode(t, client, NODE+"2"), "node2 should have the label")
+		assert.Empty(collect, labelsOfNode(t, client, NODE+"3"), "node3 should not have any labels")
 	}, 5*time.Second, time.Millisecond*50)
 
 	// Let's remove it, and see that the node is unlabeled.
-	err = client.CoreV1().Pods("default").Delete(t.Context(), "labeled-pod", metav1.DeleteOptions{})
+	err = client.CoreV1().Pods(NS).Delete(t.Context(), "labeled-pod", metav1.DeleteOptions{})
 	require.NoError(t, err, "failed to delete labeled pod")
 
 	require.NoError(t, watcher.Tick(t.Context()), "tick failed with 3 nodes and a deleted pod")
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		assert.Empty(collect, labelsOfNode(t, client, "node1"), "node1 should not have any labels")
-		assert.Empty(collect, labelsOfNode(t, client, "node2"), "node2 should not have any labels")
-		assert.Empty(collect, labelsOfNode(t, client, "node3"), "node3 should not have any labels")
+		assert.Empty(collect, labelsOfNode(t, client, NODE+"1"), "node1 should not have any labels")
+		assert.Empty(collect, labelsOfNode(t, client, NODE+"2"), "node2 should not have any labels")
+		assert.Empty(collect, labelsOfNode(t, client, NODE+"3"), "node3 should not have any labels")
 	}, 5*time.Second, time.Millisecond*50)
 
 	// And if we pretend as if Kubernetes reschedules it on another node (node3 in this case), we'll see it occurs there, too.
-	_, err = client.CoreV1().Pods("default").Apply(t.Context(),
-		acorev1.Pod("labeled-pod", "default").
+	_, err = client.CoreV1().Pods(NS).Apply(t.Context(),
+		acorev1.Pod("labeled-pod", NS).
 			WithLabels(map[string]string{"grafana.net/interesting": "true"}).
 			WithSpec(acorev1.PodSpec().
-				WithNodeName("node3").
+				WithNodeName(NODE+"3").
 				WithContainers(longRunningContainer())),
 		metav1.ApplyOptions{FieldManager: t.Name()})
 	require.NoError(t, err, "failed to create labeled pod")
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		pod, err := client.CoreV1().Pods("default").Get(t.Context(), "labeled-pod", metav1.GetOptions{})
+		pod, err := client.CoreV1().Pods(NS).Get(t.Context(), "labeled-pod", metav1.GetOptions{})
 		if assert.NoError(collect, err, "failed getting pod") {
 			assert.Contains(collect, pod.Labels, "grafana.net/interesting", "pod should have the label")
 		}
@@ -173,25 +187,25 @@ func testWatcherLabelOperations(t testing.TB, client kubernetes.Interface) {
 
 	require.NoError(t, watcher.Tick(t.Context()), "tick failed with 3 nodes and a labeled pod")
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		assert.Empty(collect, labelsOfNode(t, client, "node1"), "node1 should not have any labels")
-		assert.Empty(collect, labelsOfNode(t, client, "node2"), "node2 should not have any labels")
-		assert.Equal(collect, map[string]string{"grafana.net/look-at-me": "true"}, labelsOfNode(t, client, "node3"), "node3 should have the label")
+		assert.Empty(collect, labelsOfNode(t, client, NODE+"1"), "node1 should not have any labels")
+		assert.Empty(collect, labelsOfNode(t, client, NODE+"2"), "node2 should not have any labels")
+		assert.Equal(collect, map[string]string{"grafana.net/look-at-me": "true"}, labelsOfNode(t, client, NODE+"3"), "node3 should have the label")
 	}, 5*time.Second, time.Millisecond*50)
 
 	// Look at what happens now: we will schedule move the pod on a node that doesn't exist (i.e. in a real K8s setup, it would never schedule).
 	// This should simply remove the label from the old node, as the new pod can't be scheduled.
-	err = client.CoreV1().Pods("default").Delete(t.Context(), "labeled-pod", metav1.DeleteOptions{})
+	err = client.CoreV1().Pods(NS).Delete(t.Context(), "labeled-pod", metav1.DeleteOptions{})
 	require.NoError(t, err, "failed to delete labeled pod")
-	_, err = client.CoreV1().Pods("default").Apply(t.Context(),
-		acorev1.Pod("labeled-pod", "default").
+	_, err = client.CoreV1().Pods(NS).Apply(t.Context(),
+		acorev1.Pod("labeled-pod", NS).
 			WithLabels(map[string]string{"grafana.net/interesting": "true"}).
 			WithSpec(acorev1.PodSpec().
-				WithNodeName("node999").
+				WithNodeName(NODE+"999").
 				WithContainers(longRunningContainer())),
 		metav1.ApplyOptions{FieldManager: t.Name()})
 	require.NoError(t, err, "failed to create labeled pod")
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		pod, err := client.CoreV1().Pods("default").Get(t.Context(), "labeled-pod", metav1.GetOptions{})
+		pod, err := client.CoreV1().Pods(NS).Get(t.Context(), "labeled-pod", metav1.GetOptions{})
 		if assert.NoError(collect, err, "failed getting pod") {
 			assert.Contains(collect, pod.Labels, "grafana.net/interesting", "pod should have the label")
 		}
@@ -199,9 +213,9 @@ func testWatcherLabelOperations(t testing.TB, client kubernetes.Interface) {
 
 	require.NoError(t, watcher.Tick(t.Context()), "tick failed with 3 nodes and a labeled pod")
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		assert.Empty(collect, labelsOfNode(t, client, "node1"), "node1 should not have any labels")
-		assert.Empty(collect, labelsOfNode(t, client, "node2"), "node2 should not have any labels")
-		assert.Empty(collect, labelsOfNode(t, client, "node3"), "node3 should not have any labels")
+		assert.Empty(collect, labelsOfNode(t, client, NODE+"1"), "node1 should not have any labels")
+		assert.Empty(collect, labelsOfNode(t, client, NODE+"2"), "node2 should not have any labels")
+		assert.Empty(collect, labelsOfNode(t, client, NODE+"3"), "node3 should not have any labels")
 	}, 5*time.Second, time.Millisecond*50)
 }
 
