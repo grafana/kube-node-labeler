@@ -43,7 +43,6 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("reading config file: %w", err)
 	}
-
 	defer configFile.Close() //nolint:errcheck
 
 	cfg, err := config.Read(configFile)
@@ -62,24 +61,18 @@ func run() error {
 	}
 
 	reg := metrics.NewRegistry()
-	handler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
+	metrics := metrics.New(reg)
+	handler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg})
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", handler)
 
-	nl := &watcher.NodeLabeler{
-		Log:           log,
-		Metrics:       metrics.New(reg),
-		KubeClient:    clientset,
-		ConfigEntries: cfg.Entries,
-	}
-
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	eg := errgroup.Group{}
+	eg, ctx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
-		return nl.Start(ctx)
+		return watcher.StartForEntries(ctx, log, metrics, clientset, cfg.Entries)
 	})
 	eg.Go(func() error {
 		return http.ListenAndServe(cfg.MetricsAddr, mux)
