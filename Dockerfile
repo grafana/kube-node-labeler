@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM ghcr.io/grafana/grafana-build-tools:v1.10.0@sha256:3c9d1ee0bceed38ad4aa9ca86bbad8f6b2a903b7647670f1858b784189ae5069 AS buildtools
+FROM --platform=$BUILDPLATFORM ghcr.io/grafana/grafana-build-tools:v1.13.0@sha256:8a314d3961678a751a45e7ba4fe3e0a21ca69d479f305e6224e2a011428f6384 AS buildtools
 WORKDIR /kube-node-labeler
 
 COPY . .
