@@ -104,6 +104,8 @@ func (w *watcher) Start(ctx context.Context) error {
 				return fmt.Errorf("listing pods: %w", err)
 			}
 
+			log.Debug("Pod list complete", "found", len(pods), "label", w.entry.LabelSelector.String())
+
 			shouldHaveLabel := map[string]bool{}
 			for _, pod := range pods {
 				log.Debug("Flagging node as containing matching pod", "node", pod.Spec.NodeName, "pod", pod.Name)

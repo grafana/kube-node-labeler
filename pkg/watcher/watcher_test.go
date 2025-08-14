@@ -79,11 +79,11 @@ func testMigratingPodSequence(t *testing.T, fakeCS bool) {
 	}
 
 	// Timings for the test.
-	nlInterval := time.Second
+	nlInterval := 500 * time.Millisecond
 	// Informers interact weirdly with the k8s fake client. Work around that by making them poll very often.
 	// Ref: https://github.com/kubernetes/kubernetes/issues/95372#issuecomment-717016660
-	resyncPeriod := 400 * time.Millisecond
-	reconcileTime := 1500 * time.Millisecond
+	resyncPeriod := 100 * time.Millisecond
+	reconcileTime := 600 * time.Millisecond
 	if !fakeCS {
 		// We're working with a real cluster, be friendlier and/or more lenient
 		nlInterval = 3 * time.Second
@@ -130,6 +130,10 @@ func testMigratingPodSequence(t *testing.T, fakeCS bool) {
 			t.Fail()
 		}
 	}()
+
+	// Wait for the nodeLabeler to start before creating items on the fakeclient.
+	// This should not be needed, but experimentally the test seems flaky without this.
+	time.Sleep(reconcileTime)
 
 	if fakeCS {
 		t.Log("Running on the fake client, creating starting nodes")
