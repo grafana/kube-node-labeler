@@ -144,6 +144,8 @@ func testWatcherLabelOperations(t testing.TB, client kubernetes.Interface) {
 	_, err = client.CoreV1().Nodes().Apply(ctx, acorev1.Node(nodePrefix+"3"), metav1.ApplyOptions{FieldManager: t.Name()})
 	require.NoError(t, err, "failed to create node")
 
+	time.Sleep(config.ResyncPeriod * 2) // give the informer some time
+
 	require.NoError(t, watcher.Tick(ctx), "tick failed with 3 nodes and no pods")
 	require.Empty(t, labelsOfNode(t, client, nodePrefix+"1"), "node1 should not have any labels")
 	require.Empty(t, labelsOfNode(t, client, nodePrefix+"2"), "node2 should not have any labels")
