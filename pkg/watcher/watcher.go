@@ -136,11 +136,19 @@ func (w *NamespaceWatcher) waitForCacheSync(ctx context.Context, timeout time.Du
 // Unlike `StartInformerBlocking`, calls to this function never consume the watcher.
 // It is also valid to call this function in parallel to `StartInformerBlocking`, although that is primarily done in tests.
 func (w *NamespaceWatcher) Tick(ctx context.Context) error {
-	w.log.Debug("Starting tick")
+	log := w.log
+	now := time.Now()
+	if fields := loggerFieldsFromCtx(ctx); len(fields) > 0 {
+		log = log.With(fields...)
+		log = log.With("tick", now.Format(time.RFC3339Nano))
+	}
+	defer func() { log.Error("Tick completed", "duration", time.Since(now).String()) }()
+
+	log.Debug("Starting tick")
 	start := time.Now()
 	w.metrics.Iterations.WithLabelValues(w.entry.NodeLabel).Inc()
 
-	w.log.Debug("Listing pods in ns")
+	log.Debug("Listing pods in ns")
 	// TODO: I'm unsure whether this operation will scale. The list is namespaced, but the SharedInformerFactory
 	// is not. This is hard to figure out from the code, so I guess we'll need to FAFO.
 	pods, err := w.sif.Core().V1().Pods().Lister().Pods(w.entry.Namespace).List(w.entry.LabelSelector)
@@ -150,28 +158,30 @@ func (w *NamespaceWatcher) Tick(ctx context.Context) error {
 
 	shouldHaveLabel := map[string]bool{}
 	for _, pod := range pods {
-		w.log.Debug("Flagging node as containing matching pod", "node", pod.Spec.NodeName, "pod", pod.Name)
+		log.Debug("Flagging node as containing matching pod", "node", pod.Spec.NodeName, "pod", pod.Name)
 		shouldHaveLabel[pod.Spec.NodeName] = true
 	}
-	w.log.Debug("Computed nodes that should have label", "num_nodes", len(shouldHaveLabel))
+	log.Info("Computed nodes that should have label", "num_nodes", len(shouldHaveLabel), "value", shouldHaveLabel)
 
-	w.log.Debug("Listing nodes")
+	log.Debug("Listing nodes")
 	// TODO(perf): We could list only nodes with the configured label. We get the nodes pods are running on from the podLister.
 	nodes, err := w.sif.Core().V1().Nodes().Lister().List(labels.Everything())
 	if err != nil {
 		return fmt.Errorf("listing nodes: %w", err)
 	}
-	w.log.Debug("Node list complete", "num_nodes", len(nodes))
+	log.Info("Node list complete", "num_nodes", len(nodes))
 
 	for _, node := range nodes {
-		log := w.log.With("node", node.Name)
+		log := log.With("node", node.Name)
+		log.Error("Processing node")
 
-		if shouldHaveLabel[node.Name] && node.Labels[w.entry.NodeLabel] != "" {
+		existingLabel, hasLabel := node.Labels[w.entry.NodeLabel]
+		if shouldHaveLabel[node.Name] && existingLabel == "true" {
 			log.Debug("Target node is already labeled")
 			continue
 		}
 
-		if !shouldHaveLabel[node.Name] && node.Labels[w.entry.NodeLabel] == "" {
+		if !shouldHaveLabel[node.Name] && !hasLabel {
 			log.Debug("Unlabeled node does not need to be labeled")
 			continue
 		}
@@ -189,10 +199,8 @@ func (w *NamespaceWatcher) Tick(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("adding label to node %q: %w", node.Name, err)
 			}
-		}
-
-		if !shouldHaveLabel[node.Name] {
-			log.Info("Removing label from node", "node", node.Name)
+		} else {
+			log.Info("Removing label from node")
 			// Objects returned from informers should be treated as readOnly, thus DeepCopy.
 			_, err := w.kubeClient.CoreV1().Nodes().Update(ctx, nodeWithoutLabel(node.DeepCopy(), w.entry.NodeLabel), metav1.UpdateOptions{})
 			if err != nil {
@@ -219,4 +227,17 @@ func nodeWithLabel(node *corev1.Node, label string) *corev1.Node {
 func nodeWithoutLabel(node *corev1.Node, label string) *corev1.Node {
 	delete(node.Labels, label)
 	return node
+}
+
+type loggerFieldsCtxKey int
+
+var loggerFieldsKey loggerFieldsCtxKey
+
+func WithLoggerFields(ctx context.Context, fields ...any) context.Context {
+	return context.WithValue(ctx, loggerFieldsKey, fields)
+}
+
+func loggerFieldsFromCtx(ctx context.Context) []any {
+	fields, _ := ctx.Value(loggerFieldsKey).([]any)
+	return fields
 }
