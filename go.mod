@@ -10,7 +10,7 @@ require (
 	github.com/testcontainers/testcontainers-go v0.38.0
 	golang.org/x/sync v0.16.0
 	k8s.io/api v0.33.3
-	k8s.io/apimachinery v0.33.3
+	k8s.io/apimachinery v0.33.4
 	k8s.io/client-go v0.33.3
 )
 
