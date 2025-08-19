@@ -32,7 +32,7 @@ jobs:
       - name: Build
         run: go build -o app .
 
-      - uses: kubernetes-sigs/kwok@4b79482a138149032d5817ff262a95f7da4a9394
+      - uses: kubernetes-sigs/kwok@4f0b7d4b929b9a4288a5a916d4791e7475c08552
         with:
           command: kwokctl
       - run: kwokctl create cluster
