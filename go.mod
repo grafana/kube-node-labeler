@@ -1,6 +1,6 @@
 module github.com/grafana/kube-node-labeler
 
-go 1.24.5
+go 1.25.0
 
 require (
 	github.com/docker/go-connections v0.5.0
@@ -8,7 +8,7 @@ require (
 	github.com/prometheus/client_golang v1.23.0
 	github.com/stretchr/testify v1.10.0
 	github.com/testcontainers/testcontainers-go v0.38.0
-	golang.org/x/sync v0.16.0
+	golang.org/x/sync v0.21.0
 	k8s.io/api v0.33.3
 	k8s.io/apimachinery v0.33.3
 	k8s.io/client-go v0.33.3
